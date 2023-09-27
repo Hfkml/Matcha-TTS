@@ -32,6 +32,8 @@ class MatchaTTS(BaseLightningClass):  # 🍵
         out_size,
         predict_pitch,
         predict_creak,
+        pitch_warmup,
+        creak_warmup,
         optimizer=None,
         scheduler=None,
     ):
