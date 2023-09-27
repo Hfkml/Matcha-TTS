@@ -205,7 +205,7 @@ class TextMelDataset(torch.utils.data.Dataset):
             pitch = None
         
         if self.load_creak:
-            creak = self.interpolate_creak(creak, text, _symbol_to_id[" "])
+            creak = self.interpolate_creak(creak, text, _symbol_to_id[" "], filepath)
 
         return {"x": text, "y": mel, "spk": spk, "pitch": pitch, "creak": creak}
 
@@ -217,11 +217,11 @@ class TextMelDataset(torch.utils.data.Dataset):
         return pitch 
         
     
-    def interpolate_creak(self, creak, text, splitting_symbol):
+    def interpolate_creak(self, creak, text, splitting_symbol, filename):
         splitter = (text == splitting_symbol).nonzero().squeeze(1)
         # Note: tensor_split does not removes the ; itself
         creak_groups = torch.tensor_split(text, splitter) 
-        assert len(creak_groups) == len(creak), f"Creak groups: {len(creak_groups)} vs creak: {len(creak)} for {sequence_to_text(text)}"
+        assert len(creak_groups) == len(creak), f"Creak groups: {len(creak_groups)} vs creak: {len(creak)} for {filename}"
         final_creaks = []
         for i, creak_group in enumerate(creak_groups):
     #    if i == 0 and breath_group.nelement() == 0:
