@@ -172,7 +172,7 @@ class TextMelDataset(torch.utils.data.Dataset):
         if data_parameters is not None:
             self.data_parameters = data_parameters
         else:
-            self.data_parameters = {"mel_mean": 0, "mel_std": 1}
+            self.data_parameters = {"mel_mean": 0, "mel_std": 1, 'pitch_mean': 0, 'pitch_std': 1}
         random.seed(seed)
         random.shuffle(self.filepaths_and_text)
 
@@ -267,6 +267,8 @@ class TextMelDataset(torch.utils.data.Dataset):
 class TextMelBatchCollate:
     def __init__(self, n_spks, load_pitch=False, load_creak=False):
         self.n_spks = n_spks
+        self.load_pitch = load_pitch
+        self.load_creak = load_creak
 
     def __call__(self, batch):
         B = len(batch)
@@ -276,20 +278,24 @@ class TextMelBatchCollate:
         n_feats = batch[0]["y"].shape[-2]
 
         y = torch.zeros((B, n_feats, y_max_length), dtype=torch.float32)
-        pitch = torch.zeros((B, 1, y_max_length), dtype=torch.float32) 
         x = torch.zeros((B, x_max_length), dtype=torch.long)
-        creak = torch.zeros_like(x)
+        pitch = torch.zeros((B, 1, y_max_length), dtype=torch.float32) if self.load_pitch else None
+        creak = torch.zeros_like(x) if self.load_creak else None
         y_lengths, x_lengths = [], []
         spks = []
         for i, item in enumerate(batch):
             y_, x_ = item["y"], item["x"]
-            pitch_, creak_ = item["pitch"], item["creak"]
+            
             y_lengths.append(y_.shape[-1])
             x_lengths.append(x_.shape[-1])
             y[i, :, : y_.shape[-1]] = y_
-            pitch[i, :, : y_.shape[-1]] = F.interpolate(pitch_.view(1, 1, -1), size=y_.shape[-1]).squeeze(0)
             x[i, : x_.shape[-1]] = x_
-            creak[i, : creak_.shape[-1]] = creak_
+            if self.load_pitch:
+                pitch_ = item["pitch"]
+                pitch[i, :, : y_.shape[-1]] = F.interpolate(pitch_.view(1, 1, -1), size=y_.shape[-1]).squeeze(0)
+            if self.load_creak:
+                creak_ = item["creak"]
+                creak[i, : creak_.shape[-1]] = creak_
             
             spks.append(item["spk"])
 

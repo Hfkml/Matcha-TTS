@@ -32,6 +32,9 @@ def compute_data_statistics(data_loader: torch.utils.data.DataLoader, out_channe
     total_mel_sum = 0
     total_mel_sq_sum = 0
     total_mel_len = 0
+    
+    total_pitch_sum = 0
+    total_pitch_sq_sum = 0
 
     for batch in tqdm(data_loader, leave=False):
         mels = batch["y"]
@@ -40,11 +43,25 @@ def compute_data_statistics(data_loader: torch.utils.data.DataLoader, out_channe
         total_mel_len += torch.sum(mel_lengths)
         total_mel_sum += torch.sum(mels)
         total_mel_sq_sum += torch.sum(torch.pow(mels, 2))
+        
+        if batch["pitch"] is not None:
+            total_pitch_sum += torch.sum(batch["pitch"])
+            total_pitch_sq_sum += torch.sum(torch.pow(batch["pitch"], 2))
+            
+        break
+    
 
     data_mean = total_mel_sum / (total_mel_len * out_channels)
     data_std = torch.sqrt((total_mel_sq_sum / (total_mel_len * out_channels)) - torch.pow(data_mean, 2))
+    
+    if total_pitch_sum > 0:
+        pitch_mean = total_pitch_sum / total_mel_len
+        pitch_std = torch.sqrt((total_pitch_sq_sum / total_mel_len) - torch.pow(pitch_mean, 2))
+    else:
+        pitch_mean = torch.zeros(1)
+        pitch_std = torch.ones(1)
 
-    return {"mel_mean": data_mean.item(), "mel_std": data_std.item()}
+    return {"mel_mean": data_mean.item(), "mel_std": data_std.item(), "pitch_mean": pitch_mean.item(), "pitch_std": pitch_std.item()}
 
 
 def main():
