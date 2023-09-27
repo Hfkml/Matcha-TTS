@@ -129,9 +129,9 @@ class BaseLightningClass(LightningModule, ABC):
         )
         
         if self.global_step < self.hparams.pitch_warmup:
-            del loss_dict["pitch_loss"]
+            loss_dict["pitch_loss"] *= 0
         if self.global_step < self.hparams.creak_warmup:
-            del loss_dict["creak_loss"]
+            loss_dict["creak_loss"] *= 0
 
         total_loss = sum(loss_dict.values())
         self.log(
