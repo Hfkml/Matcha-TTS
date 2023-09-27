@@ -48,8 +48,6 @@ def compute_data_statistics(data_loader: torch.utils.data.DataLoader, out_channe
             total_pitch_sum += torch.sum(batch["pitch"])
             total_pitch_sq_sum += torch.sum(torch.pow(batch["pitch"], 2))
             
-        break
-    
 
     data_mean = total_mel_sum / (total_mel_len * out_channels)
     data_std = torch.sqrt((total_mel_sq_sum / (total_mel_len * out_channels)) - torch.pow(data_mean, 2))
