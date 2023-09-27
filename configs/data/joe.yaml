@@ -1,0 +1,20 @@
+defaults:
+  - ljspeech
+  - _self_
+
+_target_: matcha.data.text_mel_datamodule.TextMelDataModule
+name: joe
+train_filelist_path: data/creak_train_speaker2.txt
+valid_filelist_path: data/creak_test_speaker2.txt
+batch_size: 32
+add_blank: True
+n_spks: 2
+data_statistics:  # Computed for vctk dataset
+  mel_mean: 0 
+  mel_std: 1
+  pitch_mean: 0
+  pitch_std: 1
+
+load_pitch: True 
+load_creak: True
+cleaners: [english_cleaners]
