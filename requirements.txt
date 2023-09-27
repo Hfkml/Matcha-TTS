@@ -42,3 +42,5 @@ gradio
 gdown
 wget
 seaborn
+unidecode
+inflect

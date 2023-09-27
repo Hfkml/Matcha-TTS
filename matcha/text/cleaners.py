@@ -1,5 +1,12 @@
-""" from https://github.com/keithito/tacotron
+import re
 
+from unidecode import unidecode
+
+from .numbers import normalize_numbers
+
+"""from https://github.com/keithito/tacotron."""
+
+"""
 Cleaners are transformations that run over the input text at both training and eval time.
 
 Cleaners can be selected by passing a comma-delimited list of cleaner names as the "cleaners"
@@ -10,28 +17,6 @@ hyperparameter. Some cleaners are English-specific. You'll typically want to use
   3. "basic_cleaners" if you do not want to transliterate (in this case, you should also update
      the symbols in symbols.py to match your data).
 """
-
-import logging
-import re
-
-import phonemizer
-from unidecode import unidecode
-
-# To avoid excessive logging we set the log level of the phonemizer package to Critical
-critical_logger = logging.getLogger("phonemizer")
-critical_logger.setLevel(logging.CRITICAL)
-
-# Intializing the phonemizer globally significantly reduces the speed
-# now the phonemizer is not initialising at every call
-# Might be less flexible, but it is much-much faster
-global_phonemizer = phonemizer.backend.EspeakBackend(
-    language="en-us",
-    preserve_punctuation=True,
-    with_stress=True,
-    language_switch="remove-flags",
-    logger=critical_logger,
-)
-
 
 # Regular expression matching whitespace:
 _whitespace_re = re.compile(r"\s+")
@@ -68,6 +53,10 @@ def expand_abbreviations(text):
     return text
 
 
+def expand_numbers(text):
+    return normalize_numbers(text)
+
+
 def lowercase(text):
     return text.lower()
 
@@ -95,11 +84,11 @@ def transliteration_cleaners(text):
     return text
 
 
-def english_cleaners2(text):
-    """Pipeline for English text, including abbreviation expansion. + punctuation + stress"""
+def english_cleaners(text):
+    """Pipeline for English text, including number and abbreviation expansion."""
     text = convert_to_ascii(text)
     text = lowercase(text)
+    text = expand_numbers(text)
     text = expand_abbreviations(text)
-    phonemes = global_phonemizer.phonemize([text], strip=True, njobs=1)[0]
-    phonemes = collapse_whitespace(phonemes)
-    return phonemes
+    text = collapse_whitespace(text)
+    return text
