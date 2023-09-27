@@ -1,12 +1,17 @@
 import random
+from ast import literal_eval
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
+import torch.nn.functional as F
 import torchaudio as ta
+from einops import rearrange
 from lightning import LightningDataModule
 from torch.utils.data.dataloader import DataLoader
 
-from matcha.text import text_to_sequence
+from matcha.text import (_id_to_symbol, _symbol_to_id, sequence_to_text,
+                         text_to_sequence)
 from matcha.utils.audio import mel_spectrogram
 from matcha.utils.model import fix_len_compatibility, normalize
 from matcha.utils.utils import intersperse
@@ -39,6 +44,8 @@ class TextMelDataModule(LightningDataModule):
         f_max,
         data_statistics,
         seed,
+        load_pitch,
+        load_creak,
     ):
         super().__init__()
 
@@ -68,6 +75,8 @@ class TextMelDataModule(LightningDataModule):
             self.hparams.f_max,
             self.hparams.data_statistics,
             self.hparams.seed,
+            self.hparams.load_pitch,
+            self.hparams.load_creak,
         )
         self.validset = TextMelDataset(  # pylint: disable=attribute-defined-outside-init
             self.hparams.valid_filelist_path,
@@ -83,6 +92,8 @@ class TextMelDataModule(LightningDataModule):
             self.hparams.f_max,
             self.hparams.data_statistics,
             self.hparams.seed,
+            self.hparams.load_pitch,
+            self.hparams.load_creak,
         )
 
     def train_dataloader(self):
@@ -92,7 +103,11 @@ class TextMelDataModule(LightningDataModule):
             num_workers=self.hparams.num_workers,
             pin_memory=self.hparams.pin_memory,
             shuffle=True,
-            collate_fn=TextMelBatchCollate(self.hparams.n_spks),
+            collate_fn=TextMelBatchCollate(
+                self.hparams.n_spks,
+                self.hparams.load_pitch,
+                self.hparams.load_creak
+            ),
         )
 
     def val_dataloader(self):
@@ -102,7 +117,11 @@ class TextMelDataModule(LightningDataModule):
             num_workers=self.hparams.num_workers,
             pin_memory=self.hparams.pin_memory,
             shuffle=False,
-            collate_fn=TextMelBatchCollate(self.hparams.n_spks),
+            collate_fn=TextMelBatchCollate(
+                self.hparams.n_spks,
+                self.hparams.load_pitch,
+                self.hparams.load_creak
+            ),
         )
 
     def teardown(self, stage: Optional[str] = None):
@@ -134,6 +153,8 @@ class TextMelDataset(torch.utils.data.Dataset):
         f_max=8000,
         data_parameters=None,
         seed=None,
+        load_pitch=False,
+        load_creak=False,
     ):
         self.filepaths_and_text = parse_filelist(filelist_path)
         self.n_spks = n_spks
@@ -146,6 +167,8 @@ class TextMelDataset(torch.utils.data.Dataset):
         self.win_length = win_length
         self.f_min = f_min
         self.f_max = f_max
+        self.load_pitch= load_pitch
+        self.load_creak = load_creak
         if data_parameters is not None:
             self.data_parameters = data_parameters
         else:
@@ -155,19 +178,59 @@ class TextMelDataset(torch.utils.data.Dataset):
 
     def get_datapoint(self, filepath_and_text):
         if self.n_spks > 1:
-            filepath, spk, text = (
-                filepath_and_text[0],
-                int(filepath_and_text[1]),
-                filepath_and_text[2],
-            )
+            if self.load_creak:
+                filepath, spk, text, creak = (
+                    filepath_and_text[0],
+                    int(filepath_and_text[1]),
+                    filepath_and_text[2],
+                    torch.tensor(literal_eval(filepath_and_text[3]))
+                )
+            else: 
+                filepath, spk, text = (
+                    filepath_and_text[0],
+                    int(filepath_and_text[1]),
+                    filepath_and_text[2],
+                )
+                creak = None
         else:
             filepath, text = filepath_and_text[0], filepath_and_text[1]
             spk = None
 
         text = self.get_text(text, add_blank=self.add_blank)
         mel = self.get_mel(filepath)
+        
+        if self.load_pitch:
+            pitch = self.get_pitch(filepath)
+        else:
+            pitch = None
+        
+        if self.load_creak:
+            creak = self.interpolate_creak(creak, text, _symbol_to_id[" "])
 
-        return {"x": text, "y": mel, "spk": spk}
+        return {"x": text, "y": mel, "spk": spk, "pitch": pitch, "creak": creak}
+
+    def get_pitch(self, filepath):
+        filepath = Path(filepath)
+        pitch_filepath = filepath.parent / "pitch" / filepath.name.replace(".wav", ".pt")
+        pitch = torch.load(pitch_filepath).flatten()
+        pitch = normalize(pitch, self.data_parameters["pitch_mean"], self.data_parameters["pitch_std"])
+        return pitch 
+        
+    
+    def interpolate_creak(self, creak, text, splitting_symbol):
+        splitter = (text == splitting_symbol).nonzero().squeeze(1)
+        # Note: tensor_split does not removes the ; itself
+        creak_groups = torch.tensor_split(text, splitter) 
+        assert len(creak_groups) == len(creak), f"Creak groups: {len(creak_groups)} vs creak: {len(creak)} for {sequence_to_text(text)}"
+        final_creaks = []
+        for i, creak_group in enumerate(creak_groups):
+    #    if i == 0 and breath_group.nelement() == 0:
+    #        continue
+            final_creaks.append(torch.tensor([creak[i]] * (creak_group.shape[0])))
+
+        final_creaks = torch.cat(final_creaks)
+        return final_creaks
+        
 
     def get_mel(self, filepath):
         audio, sr = ta.load(filepath)
@@ -202,7 +265,7 @@ class TextMelDataset(torch.utils.data.Dataset):
 
 
 class TextMelBatchCollate:
-    def __init__(self, n_spks):
+    def __init__(self, n_spks, load_pitch=False, load_creak=False):
         self.n_spks = n_spks
 
     def __call__(self, batch):
@@ -213,19 +276,25 @@ class TextMelBatchCollate:
         n_feats = batch[0]["y"].shape[-2]
 
         y = torch.zeros((B, n_feats, y_max_length), dtype=torch.float32)
+        pitch = torch.zeros((B, 1, y_max_length), dtype=torch.float32) 
         x = torch.zeros((B, x_max_length), dtype=torch.long)
+        creak = torch.zeros_like(x)
         y_lengths, x_lengths = [], []
         spks = []
         for i, item in enumerate(batch):
             y_, x_ = item["y"], item["x"]
+            pitch_, creak_ = item["pitch"], item["creak"]
             y_lengths.append(y_.shape[-1])
             x_lengths.append(x_.shape[-1])
             y[i, :, : y_.shape[-1]] = y_
+            pitch[i, :, : y_.shape[-1]] = F.interpolate(pitch_.view(1, 1, -1), size=y_.shape[-1]).squeeze(0)
             x[i, : x_.shape[-1]] = x_
+            creak[i, : creak_.shape[-1]] = creak_
+            
             spks.append(item["spk"])
 
         y_lengths = torch.tensor(y_lengths, dtype=torch.long)
         x_lengths = torch.tensor(x_lengths, dtype=torch.long)
         spks = torch.tensor(spks, dtype=torch.long) if self.n_spks > 1 else None
 
-        return {"x": x, "x_lengths": x_lengths, "y": y, "y_lengths": y_lengths, "spks": spks}
+        return {"x": x, "x_lengths": x_lengths, "y": y, "y_lengths": y_lengths, "spks": spks, "pitch": pitch, "creak": creak}

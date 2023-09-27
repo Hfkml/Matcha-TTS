@@ -56,21 +56,20 @@ class BaseLightningClass(LightningModule, ABC):
     def get_losses(self, batch):
         x, x_lengths = batch["x"], batch["x_lengths"]
         y, y_lengths = batch["y"], batch["y_lengths"]
+        pitch, creak = batch["pitch"], batch["creak"]
         spks = batch["spks"]
 
-        dur_loss, prior_loss, diff_loss = self(
+        losses = self(
             x=x,
             x_lengths=x_lengths,
             y=y,
             y_lengths=y_lengths,
             spks=spks,
             out_size=self.out_size,
+            pitch_tgt=pitch,
+            creak_tgt=creak,
         )
-        return {
-            "dur_loss": dur_loss,
-            "prior_loss": prior_loss,
-            "diff_loss": diff_loss,
-        }
+        return losses
 
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
         self.ckpt_loaded_epoch = checkpoint["epoch"]  # pylint: disable=attribute-defined-outside-init
@@ -102,6 +101,24 @@ class BaseLightningClass(LightningModule, ABC):
             logger=True,
             sync_dist=True,
         )
+        self.log(
+            "sub_loss/train_pitch_loss",
+            loss_dict["pitch_loss"],
+            on_step=True,
+            on_epoch=True,
+            logger=True,
+            sync_dist=True,
+        )
+        
+        self.log(
+            "sub_loss/train_creak_loss",
+            loss_dict["creak_loss"],
+            on_step=True,
+            on_epoch=True,
+            logger=True,
+            sync_dist=True,
+        )
+        
         self.log(
             "sub_loss/train_diff_loss",
             loss_dict["diff_loss"],
@@ -145,6 +162,24 @@ class BaseLightningClass(LightningModule, ABC):
         self.log(
             "sub_loss/val_diff_loss",
             loss_dict["diff_loss"],
+            on_step=True,
+            on_epoch=True,
+            logger=True,
+            sync_dist=True,
+        )
+        
+        self.log(
+            "sub_loss/val_pitch_loss",
+            loss_dict["pitch_loss"],
+            on_step=True,
+            on_epoch=True,
+            logger=True,
+            sync_dist=True,
+        )
+        
+        self.log(
+            "sub_loss/val_creak_loss",
+            loss_dict["creak_loss"],
             on_step=True,
             on_epoch=True,
             logger=True,

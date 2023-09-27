@@ -4,6 +4,7 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
 
 import matcha.utils as utils
@@ -331,6 +332,8 @@ class TextEncoder(nn.Module):
         encoder_type,
         encoder_params,
         duration_predictor_params,
+        predict_pitch,
+        predict_creak,
         n_vocab,
         n_spks=1,
         spk_emb_dim=128,
@@ -342,6 +345,8 @@ class TextEncoder(nn.Module):
         self.n_channels = encoder_params.n_channels
         self.spk_emb_dim = spk_emb_dim
         self.n_spks = n_spks
+        self.predict_pitch = predict_pitch
+        self.predict_creak = predict_creak
 
         self.emb = torch.nn.Embedding(n_vocab, self.n_channels)
         torch.nn.init.normal_(self.emb.weight, 0.0, self.n_channels**-0.5)
@@ -375,6 +380,23 @@ class TextEncoder(nn.Module):
             duration_predictor_params.p_dropout,
         )
 
+        if self.predict_pitch:
+            self.pitch_predictor = DurationPredictor(
+            self.n_channels + (spk_emb_dim if n_spks > 1 else 0),
+            duration_predictor_params.filter_channels_dp,
+            duration_predictor_params.kernel_size,
+            duration_predictor_params.p_dropout,
+        )
+            
+        if self.predict_creak:
+            self.creak_predictor = DurationPredictor(
+            self.n_channels + (spk_emb_dim if n_spks > 1 else 0),
+            duration_predictor_params.filter_channels_dp,
+            duration_predictor_params.kernel_size,
+            duration_predictor_params.p_dropout,
+        )
+        
+
     def forward(self, x, x_lengths, spks=None):
         """Run forward pass to the transformer based encoder and duration predictor
 
@@ -406,5 +428,24 @@ class TextEncoder(nn.Module):
 
         x_dp = torch.detach(x)
         logw = self.proj_w(x_dp, x_mask)
-
-        return mu, logw, x_mask
+        
+        if self.predict_pitch:
+            pitch_pred = F.relu(self.pitch_predictor(x, x_mask))
+            x = x + pitch_pred
+        else:
+            pitch_pred = None
+        
+        if self.creak_predictor:
+            creak_pred = F.sigmoid(self.creak_predictor(x, x_mask))
+            x = x + creak_pred
+        else:
+            creak_pred = None
+        
+        return {
+            "mu": mu,
+            "logw": logw,
+            "x_mask": x_mask,
+            "raw_enc_output": x,
+            "pitch_pred": pitch_pred,
+            "creak_pred": creak_pred,
+        }

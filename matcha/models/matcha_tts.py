@@ -3,19 +3,17 @@ import math
 import random
 
 import torch
+import torch.nn.functional as F
+from einops import rearrange
 
 import matcha.utils.monotonic_align as monotonic_align
 from matcha import utils
 from matcha.models.baselightningmodule import BaseLightningClass
 from matcha.models.components.flow_matching import CFM
 from matcha.models.components.text_encoder import TextEncoder
-from matcha.utils.model import (
-    denormalize,
-    duration_loss,
-    fix_len_compatibility,
-    generate_path,
-    sequence_mask,
-)
+from matcha.utils.model import (average_pitch, denormalize, duration_loss,
+                                fix_len_compatibility, generate_path,
+                                sequence_mask)
 
 log = utils.get_pylogger(__name__)
 
@@ -32,6 +30,8 @@ class MatchaTTS(BaseLightningClass):  # 🍵
         cfm,
         data_statistics,
         out_size,
+        predict_pitch,
+        predict_creak,
         optimizer=None,
         scheduler=None,
     ):
@@ -44,6 +44,8 @@ class MatchaTTS(BaseLightningClass):  # 🍵
         self.spk_emb_dim = spk_emb_dim
         self.n_feats = n_feats
         self.out_size = out_size
+        self.predict_pitch = predict_pitch
+        self.predict_creak = predict_creak
 
         if n_spks > 1:
             self.spk_emb = torch.nn.Embedding(n_spks, spk_emb_dim)
@@ -52,10 +54,12 @@ class MatchaTTS(BaseLightningClass):  # 🍵
             encoder.encoder_type,
             encoder.encoder_params,
             encoder.duration_predictor_params,
+            predict_pitch,
+            predict_creak,
             n_vocab,
             n_spks,
             spk_emb_dim,
-        )
+           )
 
         self.decoder = CFM(
             in_channels=2 * encoder.encoder_params.n_feats,
@@ -69,7 +73,7 @@ class MatchaTTS(BaseLightningClass):  # 🍵
         self.update_data_statistics(data_statistics)
 
     @torch.inference_mode()
-    def synthesise(self, x, x_lengths, n_timesteps, temperature=1.0, spks=None, length_scale=1.0):
+    def synthesise(self, x, x_lengths, n_timesteps, temperature=1.0, spks=None, length_scale=1.0, creak=None, pitch=None):
         """
         Generates mel-spectrogram from text. Returns:
             1. encoder outputs
@@ -111,7 +115,12 @@ class MatchaTTS(BaseLightningClass):  # 🍵
             spks = self.spk_emb(spks.long())
 
         # Get encoder_outputs `mu_x` and log-scaled token durations `logw`
-        mu_x, logw, x_mask = self.encoder(x, x_lengths, spks)
+        enc_output = self.encoder(x, x_lengths, spks)
+        mu_x, logw, x_mask = enc_output['mu'], enc_output['logw'], enc_output['x_mask']
+        
+        pitch_pred = enc_output['pitch_pred'] if self.predict_pitch else None
+        creak_pred = enc_output['creak_pred'] if self.predict_creak else None
+        
 
         w = torch.exp(logw) * x_mask
         w_ceil = torch.ceil(w) * length_scale
@@ -125,12 +134,15 @@ class MatchaTTS(BaseLightningClass):  # 🍵
         attn = generate_path(w_ceil.squeeze(1), attn_mask.squeeze(1)).unsqueeze(1)
 
         # Align encoded text and get mu_y
-        mu_y = torch.matmul(attn.squeeze(1).transpose(1, 2), mu_x.transpose(1, 2))
-        mu_y = mu_y.transpose(1, 2)
+        mu_y = torch.matmul(attn.squeeze(1).transpose(1, 2), mu_x.transpose(1, 2)).transpose(1, 2)
+        mu_pitch = torch.matmul(attn.squeeze(1).transpose(1, 2), pitch_pred.transpose(1, 2)).transpose(1, 2) if self.predict_pitch else 0
+        mu_creak = torch.matmul(attn.squeeze(1).transpose(1, 2), creak_pred.transpose(1, 2)).transpose(1, 2) if self.predict_creak else 0
         encoder_outputs = mu_y[:, :, :y_max_length]
+        
+        
 
         # Generate sample tracing the probability flow
-        decoder_outputs = self.decoder(mu_y, y_mask, n_timesteps, temperature, spks)
+        decoder_outputs = self.decoder((mu_y + mu_pitch + mu_creak), y_mask, n_timesteps, temperature, spks)
         decoder_outputs = decoder_outputs[:, :, :y_max_length]
 
         t = (dt.datetime.now() - t).total_seconds()
@@ -145,7 +157,7 @@ class MatchaTTS(BaseLightningClass):  # 🍵
             "rtf": rtf,
         }
 
-    def forward(self, x, x_lengths, y, y_lengths, spks=None, out_size=None, cond=None):
+    def forward(self, x, x_lengths, y, y_lengths, spks=None, out_size=None, pitch_tgt=None, creak_tgt=None, cond=None):
         """
         Computes 3 losses:
             1. duration loss: loss between predicted token durations and those extracted by Monotinic Alignment Search (MAS).
@@ -171,7 +183,12 @@ class MatchaTTS(BaseLightningClass):  # 🍵
             spks = self.spk_emb(spks)
 
         # Get encoder_outputs `mu_x` and log-scaled token durations `logw`
-        mu_x, logw, x_mask = self.encoder(x, x_lengths, spks)
+        enc_output = self.encoder(x, x_lengths, spks)
+        mu_x, logw, x_mask = enc_output['mu'], enc_output['logw'], enc_output['x_mask']
+        
+        pitch_pred = enc_output['pitch_pred'] if self.predict_pitch else None
+        creak_pred = enc_output['creak_pred'] if self.predict_creak else None
+        
         y_max_length = y.shape[-1]
 
         y_mask = sequence_mask(y_lengths, y_max_length).unsqueeze(1).to(x_mask)
@@ -193,7 +210,18 @@ class MatchaTTS(BaseLightningClass):  # 🍵
         # refered to as prior loss in the paper
         logw_ = torch.log(1e-8 + torch.sum(attn.unsqueeze(1), -1)) * x_mask
         dur_loss = duration_loss(logw, logw_, x_lengths)
-
+        
+        if self.predict_pitch:        
+            pitch_tgt = average_pitch(pitch_tgt, attn.sum(-1))
+            pitch_loss = duration_loss(pitch_pred, pitch_tgt, x_lengths)
+        else:
+            pitch_loss = 0
+        
+        if self.predict_creak:
+            creak_loss = duration_loss(creak_pred, rearrange(creak_tgt, "b t-> b 1 t"), x_lengths)
+        else:
+            creak_loss = 0
+         
         # Cut a small segment of mel-spectrogram in order to increase batch size
         #   - "Hack" taken from Grad-TTS, in case of Grad-TTS, we cannot train batch size 32 on a 24GB GPU without it
         #   - Do not need this hack for Matcha-TTS, but it works with it as well
@@ -224,11 +252,19 @@ class MatchaTTS(BaseLightningClass):  # 🍵
         # Align encoded text with mel-spectrogram and get mu_y segment
         mu_y = torch.matmul(attn.squeeze(1).transpose(1, 2), mu_x.transpose(1, 2))
         mu_y = mu_y.transpose(1, 2)
-
+        mu_pitch = torch.matmul(attn.squeeze(1).transpose(1, 2), pitch_pred.transpose(1, 2)).transpose(1, 2) if self.predict_pitch else 0
+        mu_creak = torch.matmul(attn.squeeze(1).transpose(1, 2), creak_pred.transpose(1, 2)).transpose(1, 2) if self.predict_creak else 0
+        
         # Compute loss of the decoder
-        diff_loss, _ = self.decoder.compute_loss(x1=y, mask=y_mask, mu=mu_y, spks=spks, cond=cond)
+        diff_loss, _ = self.decoder.compute_loss(x1=y, mask=y_mask, mu=(mu_y + mu_pitch + mu_creak), spks=spks, cond=cond)
 
         prior_loss = torch.sum(0.5 * ((y - mu_y) ** 2 + math.log(2 * math.pi)) * y_mask)
         prior_loss = prior_loss / (torch.sum(y_mask) * self.n_feats)
 
-        return dur_loss, prior_loss, diff_loss
+        return {
+            'dur_loss': dur_loss,
+            'prior_loss': prior_loss,
+            'diff_loss': diff_loss,
+            'pitch_loss': pitch_loss,
+            'creak_loss': creak_loss,
+        }

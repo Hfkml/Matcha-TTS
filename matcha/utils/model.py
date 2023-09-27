@@ -2,6 +2,7 @@
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 
 def sequence_mask(length, max_length=None):
@@ -86,3 +87,25 @@ def denormalize(data, mu, std):
         std = std.unsqueeze(-1)
 
     return data * std + mu
+
+
+
+def average_pitch(pitch, durs):
+    durs_cums_ends = torch.cumsum(durs, dim=1).long()
+    durs_cums_starts = F.pad(durs_cums_ends[:, :-1], (1, 0))
+    pitch_nonzero_cums = F.pad(torch.cumsum(pitch != 0.0, dim=2), (1, 0))
+    pitch_cums = F.pad(torch.cumsum(pitch, dim=2), (1, 0))
+
+    bs, l = durs_cums_ends.size()
+    n_formants = pitch.size(1)
+    dcs = durs_cums_starts[:, None, :].expand(bs, n_formants, l)
+    dce = durs_cums_ends[:, None, :].expand(bs, n_formants, l)
+
+    pitch_sums = (torch.gather(pitch_cums, 2, dce)
+                  - torch.gather(pitch_cums, 2, dcs)).float()
+    pitch_nelems = (torch.gather(pitch_nonzero_cums, 2, dce)
+                    - torch.gather(pitch_nonzero_cums, 2, dcs)).float()
+
+    pitch_avg = torch.where(pitch_nelems == 0.0, pitch_nelems,
+                            pitch_sums / pitch_nelems)
+    return pitch_avg
